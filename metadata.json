@@ -1,0 +1,5 @@
+{
+  "name": "Ajedrez",
+  "description": "Aplicación de ajedrez de Ameliasoft LLC con modos local, remoto y contra motor heurístico hardcoded.",
+  "requestFramePermissions": []
+}
