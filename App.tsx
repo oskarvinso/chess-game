@@ -28,7 +28,8 @@ const App: React.FC = () => {
     localStorage.setItem('chess_active_mode', m);
     if (m === GameMode.REMOTE_PVP) {
       const roomId = Math.random().toString(36).substring(7);
-      window.location.hash = `remote-${roomId}`;
+      // El creador siempre es Blanco (role=w)
+      window.location.hash = `remote-${roomId}?role=w`;
     }
     setMode(m);
   };

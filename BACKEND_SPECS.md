@@ -1,27 +1,25 @@
 
 # Pautas para el Backend (gaming.ameliasoft.net/chess/api)
 
-Para que el modo **"Partida con el llave"** funcione correctamente, tu servidor debe implementar la siguiente lógica:
+Para que el modo **"Partida con el llave"** funcione con Chat y Presencia, implemente:
 
-## 1. Endpoints Mínimos
+## 1. Endpoints de Partida
+### `POST /move` y `GET /sync/:roomId`
+*   Manejan el FEN y el historial de jugadas.
 
-### `POST /move`
-*   **Propósito**: Recibir el nuevo estado del tablero cuando un jugador mueve.
-*   **Body esperado**: `{ "roomId": "xyz", "fen": "current_fen_string", "history": ["e4", "e5", "..."] }`
-*   **Acción**: Guardar este FEN e historial en una base de datos (Redis es ideal por velocidad) asociado al `roomId`.
+## 2. Endpoints de Chat
+### `POST /chat`
+*   **Body**: `{ "roomId": "xyz", "sender": "w|b", "text": "Hola!" }`
+### `GET /chat/:roomId`
+*   **Response**: `[{ "id": "...", "sender": "w", "text": "...", "timestamp": 123 }]`
 
-### `GET /sync/:roomId`
-*   **Propósito**: Que el otro jugador obtenga el movimiento del rival.
-*   **Respuesta**: `{ "fen": "last_saved_fen", "history": ["..."] }`
-*   **Nota**: Si no usas WebSockets, el frontend hará "polling" (preguntar cada pocos segundos) a este endpoint.
+## 3. Endpoints de Presencia
+### `POST /presence`
+*   **Body**: `{ "roomId": "xyz", "role": "w|b" }`
+*   **Acción**: Actualizar "lastSeen" del rol en esa sala.
+### `GET /presence/:roomId`
+*   **Response**: `{ "w": true, "b": false }` (Verdadero si lastSeen < 10s).
 
-## 2. Recomendaciones de Implementación
-1.  **Socket.io**: Es mucho mejor que REST para ajedrez. Permite que el servidor "empuje" el movimiento al rival apenas ocurre.
-2.  **Validación**: Usa la librería `chess.js` en el backend (Node.js) para validar que los movimientos sean legales antes de guardarlos.
-3.  **Créditos**: Asegúrate de que los logs del servidor también mencionen a **Ameliasoft LLC**.
-
-## 3. Flujo de Trabajo
-1.  Jugador A entra a `#remote-sala123`.
-2.  Jugador A mueve. El frontend llama a `/move`.
-3.  Jugador B (el "llave") entra al mismo link.
-4.  El frontend de Jugador B llama a `/sync/sala123` y actualiza su tablero automáticamente.
+## 4. Notas
+*   El frontend espera que estos endpoints existan bajo la base `BACKEND_URL`.
+*   Si el backend no está listo, el juego funcionará localmente pero mostrará advertencias en consola.

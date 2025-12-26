@@ -1,10 +1,10 @@
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Chess, Square } from 'chess.js';
-import { GameMode } from '../types';
+import { GameMode, ChatMessage, PlayerColor } from '../types';
 import ChessBoard from './ChessBoard';
 import { getHardcodedMove } from '../services/chessEngine';
-import { History, RotateCcw, Copy, CheckCircle2, Trophy, Cpu, Users, Globe } from 'lucide-react';
+import { History, RotateCcw, Copy, CheckCircle2, Trophy, MessageCircle, Send, Globe, User } from 'lucide-react';
 
 interface Props {
   mode: GameMode;
@@ -21,6 +21,71 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const [lastMove, setLastMove] = useState<{from: string, to: string} | null>(null);
   const [captured, setCaptured] = useState<{w: string[], b: string[]}>({w: [], b: []});
   const [showCopied, setShowCopied] = useState(false);
+
+  // Chat y Presencia
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [inputText, setInputText] = useState('');
+  const [isOpponentOnline, setIsOpponentOnline] = useState(false);
+  const [myColor, setMyColor] = useState<PlayerColor>('w');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Determinar mi color en remoto
+  useEffect(() => {
+    if (mode === GameMode.REMOTE_PVP) {
+      const urlParams = new URLSearchParams(window.location.hash.split('?')[1]);
+      const role = urlParams.get('role');
+      if (role === 'b') setMyColor('b');
+      else setMyColor('w');
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Sync de Partida, Chat y Presencia
+  useEffect(() => {
+    if (mode !== GameMode.REMOTE_PVP) return;
+    const roomId = window.location.hash.split('-')[1]?.split('?')[0];
+    if (!roomId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        // 1. Sync Movimientos
+        const resSync = await fetch(`${BACKEND_URL}/sync/${roomId}`);
+        const dataSync = await resSync.json();
+        if (dataSync.fen && dataSync.fen !== game.fen()) {
+          const newGame = new Chess(dataSync.fen);
+          setGame(newGame);
+          setFen(dataSync.fen);
+          updateCaptured(newGame);
+        }
+
+        // 2. Sync Chat
+        const resChat = await fetch(`${BACKEND_URL}/chat/${roomId}`);
+        const dataChat = await resChat.json();
+        if (Array.isArray(dataChat)) setMessages(dataChat);
+
+        // 3. Heartbeat de Presencia
+        await fetch(`${BACKEND_URL}/presence`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roomId, role: myColor })
+        });
+
+        // 4. Ver estado del oponente
+        const resPres = await fetch(`${BACKEND_URL}/presence/${roomId}`);
+        const dataPres = await resPres.json();
+        const opponentRole = myColor === 'w' ? 'b' : 'w';
+        setIsOpponentOnline(!!dataPres[opponentRole]);
+
+      } catch (e) {
+        // Silencio para no saturar consola si no hay backend
+      }
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [mode, game, myColor]);
 
   // Cargar estado guardado al iniciar
   useEffect(() => {
@@ -77,7 +142,7 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
         body: JSON.stringify({ roomId, fen: currentFen, history: game.history() })
       });
     } catch (e) {
-      console.warn("Backend de Ameliasoft LLC fuera de línea temporalmente.");
+      console.warn("Backend de Ameliasoft LLC fuera de línea.");
     }
   }, [mode, game]);
 
@@ -93,8 +158,6 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
         updateCaptured(gameCopy);
 
         if (mode === GameMode.REMOTE_PVP) {
-          const currentHash = window.location.hash.split('?')[0];
-          window.location.hash = `${currentHash}?fen=${encodeURIComponent(gameCopy.fen())}`;
           syncRemoteMove(gameCopy.fen());
         }
         return true;
@@ -121,6 +184,11 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const onSquareClick = (square: Square) => {
     if (isThinking || game.isGameOver()) return;
 
+    // Bloqueo de turno en remoto: No puedes mover si no es tu turno o tu color
+    if (mode === GameMode.REMOTE_PVP && game.turn() !== myColor) {
+        return;
+    }
+
     if (selectedSquare) {
       const moveResult = makeMove({ from: selectedSquare, to: square, promotion: 'q' });
       setSelectedSquare(null);
@@ -135,6 +203,26 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
     }
   };
 
+  const sendChatMessage = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!inputText.trim()) return;
+    
+    const roomId = window.location.hash.split('-')[1]?.split('?')[0];
+    if (!roomId) return;
+
+    const newMessage = { sender: myColor, text: inputText.trim(), id: Date.now().toString() };
+    setMessages(prev => [...prev, newMessage as ChatMessage]);
+    setInputText('');
+
+    try {
+        await fetch(`${BACKEND_URL}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roomId, ...newMessage })
+        });
+    } catch (e) { /* Fallback local */ }
+  };
+
   const resetGame = () => {
     const newGame = new Chess();
     setGame(newGame);
@@ -143,10 +231,15 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
     setLastMove(null);
     setCaptured({w: [], b: []});
     localStorage.removeItem('chess_save_data');
-    if (mode === GameMode.REMOTE_PVP) {
-        const currentHash = window.location.hash.split('?')[0];
-        window.location.hash = `${currentHash}`;
-    }
+  };
+
+  const copyInviteLink = () => {
+    const baseUrl = window.location.href.split('?')[0];
+    // Al copiar el link para el otro, le forzamos role=b
+    const inviteUrl = `${baseUrl}?role=b`;
+    navigator.clipboard.writeText(inviteUrl);
+    setShowCopied(true);
+    setTimeout(() => setShowCopied(false), 2000);
   };
 
   const isCheck = game.inCheck();
@@ -154,7 +247,7 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const history = game.history();
 
   return (
-    <div className="flex flex-col lg:flex-row gap-8 w-full max-w-6xl animate-in fade-in duration-700">
+    <div className="flex flex-col lg:flex-row gap-8 w-full max-w-7xl animate-in fade-in duration-700">
       <div className="flex-1 flex flex-col items-center">
         <div className="relative group">
           <ChessBoard 
@@ -183,11 +276,15 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
           )}
         </div>
 
-        <div className="mt-8 w-full flex justify-between items-center bg-slate-900/50 p-6 rounded-3xl border border-slate-800">
+        <div className="mt-8 w-full flex justify-between items-center bg-slate-900/50 p-6 rounded-3xl border border-slate-800 backdrop-blur-md">
           <div className="flex items-center gap-4">
             <div className={`w-4 h-4 rounded-full ${game.turn() === 'w' ? 'bg-white shadow-[0_0_10px_white]' : 'bg-slate-700 border border-slate-500'}`} />
             <span className="text-lg font-medium">
-              {game.isGameOver() ? 'Partida terminada' : `Mueve el ${game.turn() === 'w' ? "Blanco" : "Negro"}` }
+              {game.isGameOver() ? 'Partida terminada' : (
+                mode === GameMode.REMOTE_PVP 
+                ? (game.turn() === myColor ? 'Su turno, hágale' : 'Espere al llave...')
+                : `Mueve el ${game.turn() === 'w' ? "Blanco" : "Negro"}`
+              )}
             </span>
           </div>
           <div className="flex gap-3">
@@ -196,45 +293,89 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
             </button>
             {mode === GameMode.REMOTE_PVP && (
               <button 
-                onClick={() => { navigator.clipboard.writeText(window.location.href); setShowCopied(true); setTimeout(() => setShowCopied(false), 2000); }}
+                onClick={copyInviteLink}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${showCopied ? 'bg-emerald-600' : 'bg-indigo-600 hover:bg-indigo-500'}`}
               >
                 {showCopied ? <CheckCircle2 className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                <span className="text-sm font-bold">{showCopied ? '¡Copiado!' : 'Link para el llave'}</span>
+                <span className="text-sm font-bold">{showCopied ? '¡Copiado!' : 'Link pal llave'}</span>
               </button>
             )}
           </div>
         </div>
       </div>
 
-      <div className="w-full lg:w-96 flex flex-col gap-6">
-        <div className="bg-slate-900/40 p-6 rounded-3xl border border-slate-800 backdrop-blur-sm">
-          <h3 className="text-sm font-bold uppercase tracking-widest text-slate-400 mb-4">
-            {mode === GameMode.VS_CPU ? 'Contra el Teso' : mode === GameMode.LOCAL_PVP ? 'Duelo con el veci' : 'Partida con el llave'}
-          </h3>
+      <div className="w-full lg:w-[400px] flex flex-col gap-6">
+        {/* Panel Superior: Status y Capturas */}
+        <div className="bg-slate-900/60 p-6 rounded-3xl border border-slate-800 backdrop-blur-xl">
+          <div className="flex justify-between items-center mb-6">
+            <div className="flex items-center gap-2">
+                <Globe className={`w-4 h-4 ${isOpponentOnline ? 'text-emerald-400' : 'text-slate-500'}`} />
+                <span className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                    {mode === GameMode.REMOTE_PVP ? (isOpponentOnline ? 'El llave está conectado' : 'El llave se fue') : 'Local'}
+                </span>
+            </div>
+            {mode === GameMode.REMOTE_PVP && (
+                <div className="flex items-center gap-2 px-3 py-1 bg-slate-800 rounded-full">
+                    <User className="w-3 h-3 text-indigo-400" />
+                    <span className="text-[10px] font-bold text-slate-300">YO: {myColor === 'w' ? 'BLANCAS' : 'NEGRAS'}</span>
+                </div>
+            )}
+          </div>
+          
           <div className="space-y-4">
-            <p className="text-xs text-slate-500 uppercase font-bold">Fichas capturadas</p>
+            <p className="text-xs text-slate-500 uppercase font-bold tracking-tighter">Botín de guerra</p>
             <div className="flex flex-wrap gap-1">
                {captured.b.concat(captured.w).length > 0 ? captured.b.concat(captured.w).map((p, i) => (
-                 <div key={i} className="bg-slate-800 rounded p-1 text-[10px] text-slate-400 font-bold">{p.slice(1)}</div>
-               )) : <span className="text-xs italic text-slate-600">Ninguna todavía</span>}
+                 <div key={i} className="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-[10px] text-slate-300 font-bold">{p.slice(1)}</div>
+               )) : <span className="text-xs italic text-slate-600">Nadie ha caído aún</span>}
             </div>
           </div>
         </div>
 
-        <div className="flex-1 bg-slate-900/40 border border-slate-800 rounded-3xl overflow-hidden flex flex-col min-h-[300px]">
-          <div className="p-5 border-b border-slate-800 flex items-center gap-2">
-            <span className="text-sm font-bold text-slate-300 uppercase tracking-widest">Historial</span>
+        {/* Panel de Chat / Historial */}
+        <div className="flex-1 bg-slate-900/60 border border-slate-800 rounded-3xl overflow-hidden flex flex-col min-h-[400px] backdrop-blur-xl shadow-2xl">
+          <div className="flex border-b border-slate-800">
+            <button className="flex-1 py-4 text-xs font-bold tracking-widest text-indigo-400 border-b-2 border-indigo-400 uppercase">
+                Chisme y Chat
+            </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-4">
-            <div className="grid grid-cols-2 gap-2">
-              {history.map((m, i) => (
-                <div key={i} className="bg-slate-800/40 p-2 rounded-lg text-sm text-slate-200">
-                  <span className="text-slate-500 mr-2">{i + 1}.</span> {m}
+          
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[350px]">
+            {messages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-600 italic text-sm text-center px-8">
+                    <MessageCircle className="w-8 h-8 mb-2 opacity-20" />
+                    Mándele un saludo al llave para que no se aburra.
                 </div>
-              ))}
-            </div>
+            ) : (
+                messages.map((m, i) => (
+                    <div key={m.id || i} className={`flex flex-col ${m.sender === myColor ? 'items-end' : 'items-start'}`}>
+                        <div className={`max-w-[80%] p-3 rounded-2xl text-sm ${
+                            m.sender === myColor 
+                            ? 'bg-indigo-600 text-white rounded-tr-none' 
+                            : 'bg-slate-800 text-slate-200 rounded-tl-none border border-slate-700'
+                        }`}>
+                            {m.text}
+                        </div>
+                        <span className="text-[9px] text-slate-600 mt-1 uppercase font-bold">
+                            {m.sender === 'w' ? 'Blancas' : 'Negras'}
+                        </span>
+                    </div>
+                ))
+            )}
+            <div ref={chatEndRef} />
           </div>
+
+          <form onSubmit={sendChatMessage} className="p-4 bg-slate-900/80 border-t border-slate-800 flex gap-2">
+            <input 
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Dígale algo al veci..."
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
+            />
+            <button type="submit" className="p-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-white transition-all active:scale-90 shadow-lg">
+                <Send className="w-4 h-4" />
+            </button>
+          </form>
         </div>
       </div>
     </div>

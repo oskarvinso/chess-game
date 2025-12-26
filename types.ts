@@ -7,6 +7,13 @@ export enum GameMode {
 
 export type PlayerColor = 'w' | 'b';
 
+export interface ChatMessage {
+  id: string;
+  sender: PlayerColor;
+  text: string;
+  timestamp: number;
+}
+
 export interface GameState {
   fen: string;
   history: string[];
