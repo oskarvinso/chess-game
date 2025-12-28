@@ -27,7 +27,9 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const [inputText, setInputText] = useState('');
   const [isOpponentOnline, setIsOpponentOnline] = useState(false);
   const [myColor, setMyColor] = useState<PlayerColor>('w');
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  
+  // Refs para control de scroll sin saltos de página
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const isRemote = mode === GameMode.REMOTE_PVP;
 
@@ -41,8 +43,15 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
     }
   }, [isRemote]);
 
+  // Scroll automático interno (solo para el panel, no para la ventana)
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (scrollContainerRef.current) {
+      const container = scrollContainerRef.current;
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: 'smooth'
+      });
+    }
   }, [messages, game]);
 
   // Sync de Partida, Chat y Presencia
@@ -250,6 +259,7 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   return (
     <div className="flex flex-col lg:flex-row gap-8 w-full max-w-7xl animate-in fade-in duration-700">
       <div className="flex-1 flex flex-col items-center">
+        {/* Contenedor del Tablero - Mantenido estable */}
         <div className="relative group">
           <ChessBoard 
             fen={fen} 
@@ -333,7 +343,7 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
           </div>
         </div>
 
-        {/* Panel de Chat / Historial - CONDICIONAL */}
+        {/* Panel de Chat / Historial */}
         <div className="flex-1 bg-slate-900/60 border border-slate-800 rounded-3xl overflow-hidden flex flex-col min-h-[400px] backdrop-blur-xl shadow-2xl">
           <div className="flex border-b border-slate-800">
             <button className="flex-1 py-4 text-xs font-bold tracking-widest text-indigo-400 border-b-2 border-indigo-400 uppercase flex items-center justify-center gap-2">
@@ -341,9 +351,12 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
             </button>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[400px]">
+          {/* Contenedor con Ref para scroll interno */}
+          <div 
+            ref={scrollContainerRef}
+            className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[400px] scroll-smooth"
+          >
             {isRemote ? (
-                // Lógica de CHAT para Remoto
                 messages.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-600 italic text-sm text-center px-8">
                         <MessageCircle className="w-8 h-8 mb-2 opacity-20" />
@@ -366,7 +379,6 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
                     ))
                 )
             ) : (
-                // Lógica de HISTORIAL para Local / CPU
                 <div className="grid grid-cols-2 gap-2">
                     {moveHistory.length === 0 ? (
                         <div className="col-span-2 text-center text-slate-600 py-20 text-sm italic">Haga un movimiento para ver el registro.</div>
@@ -380,7 +392,6 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
                     )}
                 </div>
             )}
-            <div ref={chatEndRef} />
           </div>
 
           {isRemote && (
