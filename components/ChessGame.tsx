@@ -4,7 +4,8 @@ import { Chess, Square } from 'chess.js';
 import { GameMode, ChatMessage, PlayerColor } from '../types';
 import ChessBoard from './ChessBoard';
 import { getHardcodedMove } from '../services/chessEngine';
-import { History, RotateCcw, Copy, CheckCircle2, Trophy, MessageCircle, Send, Globe, User, List } from 'lucide-react';
+import { ChessPieces } from '../constants';
+import { RotateCcw, Copy, CheckCircle2, Trophy, MessageCircle, Send, Globe, User, List } from 'lucide-react';
 
 interface Props {
   mode: GameMode;
@@ -16,6 +17,7 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const initialGame = useMemo(() => new Chess(), []);
   const [game, setGame] = useState(initialGame);
   const [fen, setFen] = useState(initialGame.fen());
+  const [moveHistory, setMoveHistory] = useState<string[]>([]);
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
   const [isThinking, setIsThinking] = useState(false);
   const [lastMove, setLastMove] = useState<{from: string, to: string} | null>(null);
@@ -28,12 +30,43 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const [isOpponentOnline, setIsOpponentOnline] = useState(false);
   const [myColor, setMyColor] = useState<PlayerColor>('w');
   
-  // Refs para control de scroll sin saltos de página
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-
   const isRemote = mode === GameMode.REMOTE_PVP;
 
-  // Determinar mi color en remoto
+  const updateCaptured = useCallback((gameInstance: Chess) => {
+    const standardPieces: Record<string, number> = {
+      'wP': 8, 'wN': 2, 'wB': 2, 'wR': 2, 'wQ': 1,
+      'bP': 8, 'bN': 2, 'bB': 2, 'bR': 2, 'bQ': 1
+    };
+    const currentPieces: Record<string, number> = {};
+    const board = gameInstance.board();
+    
+    board.forEach(row => {
+      row.forEach(piece => {
+        if (piece) {
+          const key = `${piece.color}${piece.type.toUpperCase()}`;
+          currentPieces[key] = (currentPieces[key] || 0) + 1;
+        }
+      });
+    });
+
+    const capturedW: string[] = [];
+    const capturedB: string[] = [];
+    const pieceOrder = ['P', 'N', 'B', 'R', 'Q'];
+
+    pieceOrder.forEach(type => {
+      const wKey = `w${type}`;
+      const missingW = (standardPieces[wKey] || 0) - (currentPieces[wKey] || 0);
+      for (let i = 0; i < missingW; i++) capturedW.push(wKey);
+
+      const bKey = `b${type}`;
+      const missingB = (standardPieces[bKey] || 0) - (currentPieces[bKey] || 0);
+      for (let i = 0; i < missingB; i++) capturedB.push(bKey);
+    });
+
+    setCaptured({ w: capturedW, b: capturedB });
+  }, []);
+
   useEffect(() => {
     if (isRemote) {
       const urlParams = new URLSearchParams(window.location.hash.split('?')[1]);
@@ -43,18 +76,13 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
     }
   }, [isRemote]);
 
-  // Scroll automático interno (solo para el panel, no para la ventana)
   useEffect(() => {
     if (scrollContainerRef.current) {
       const container = scrollContainerRef.current;
-      container.scrollTo({
-        top: container.scrollHeight,
-        behavior: 'smooth'
-      });
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
     }
-  }, [messages, game]);
+  }, [messages, moveHistory]);
 
-  // Sync de Partida, Chat y Presencia
   useEffect(() => {
     if (!isRemote) return;
     const roomId = window.location.hash.split('-')[1]?.split('?')[0];
@@ -62,86 +90,79 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
 
     const interval = setInterval(async () => {
       try {
-        // 1. Sync Movimientos
         const resSync = await fetch(`${BACKEND_URL}/sync/${roomId}`);
         const dataSync = await resSync.json();
-        if (dataSync.fen && dataSync.fen !== game.fen()) {
+        // Sincronizar usando PGN si está disponible para mantener historial
+        if (dataSync.pgn && dataSync.pgn !== game.pgn()) {
+          const newGame = new Chess();
+          newGame.loadPgn(dataSync.pgn);
+          setGame(newGame);
+          setFen(newGame.fen());
+          setMoveHistory(newGame.history());
+          updateCaptured(newGame);
+        } else if (dataSync.fen && dataSync.fen !== game.fen()) {
+          // Fallback a FEN si no hay PGN
           const newGame = new Chess(dataSync.fen);
           setGame(newGame);
           setFen(dataSync.fen);
           updateCaptured(newGame);
         }
 
-        // 2. Sync Chat
         const resChat = await fetch(`${BACKEND_URL}/chat/${roomId}`);
         const dataChat = await resChat.json();
         if (Array.isArray(dataChat)) setMessages(dataChat);
 
-        // 3. Heartbeat de Presencia
         await fetch(`${BACKEND_URL}/presence`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ roomId, role: myColor })
         });
 
-        // 4. Ver estado del oponente
         const resPres = await fetch(`${BACKEND_URL}/presence/${roomId}`);
         const dataPres = await resPres.json();
         const opponentRole = myColor === 'w' ? 'b' : 'w';
         setIsOpponentOnline(!!dataPres[opponentRole]);
-
-      } catch (e) {
-        // Silencio para no saturar consola si no hay backend
-      }
+      } catch (e) { }
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [isRemote, game, myColor]);
+  }, [isRemote, game, myColor, updateCaptured]);
 
-  // Cargar estado guardado al iniciar
   useEffect(() => {
     const saved = localStorage.getItem('chess_save_data');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
         if (parsed.mode === mode) {
-          const newGame = new Chess(parsed.fen);
+          const newGame = new Chess();
+          if (parsed.pgn) {
+            newGame.loadPgn(parsed.pgn);
+          } else {
+            newGame.load(parsed.fen);
+          }
           setGame(newGame);
-          setFen(parsed.fen);
+          setFen(newGame.fen());
+          setMoveHistory(newGame.history());
           updateCaptured(newGame);
         }
-      } catch (e) {
-        console.error("No se pudo retomar la partida.");
-      }
+      } catch (e) { }
+    } else {
+      updateCaptured(initialGame);
     }
-  }, [mode]);
+  }, [mode, initialGame, updateCaptured]);
 
-  // Guardar estado en cada movimiento
   useEffect(() => {
     if (fen !== initialGame.fen()) {
       localStorage.setItem('chess_save_data', JSON.stringify({
         fen,
+        pgn: game.pgn(),
         mode,
         timestamp: Date.now()
       }));
     }
-  }, [fen, mode, initialGame]);
+  }, [fen, game, mode, initialGame]);
 
-  const updateCaptured = (gameInstance: Chess) => {
-    const history = gameInstance.history({ verbose: true });
-    const capturedW: string[] = [];
-    const capturedB: string[] = [];
-    history.forEach(m => {
-      if (m.captured) {
-        const pieceKey = `${m.color === 'w' ? 'b' : 'w'}${m.captured.toUpperCase()}`;
-        if (m.color === 'w') capturedB.push(pieceKey);
-        else capturedW.push(pieceKey);
-      }
-    });
-    setCaptured({ w: capturedW, b: capturedB });
-  };
-
-  const syncRemoteMove = useCallback(async (currentFen: string) => {
+  const syncRemoteMove = useCallback(async (gameInstance: Chess) => {
     if (!isRemote) return;
     const roomId = window.location.hash.split('-')[1]?.split('?')[0];
     if (!roomId) return;
@@ -150,36 +171,38 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
       await fetch(`${BACKEND_URL}/move`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roomId, fen: currentFen, history: game.history() })
+        body: JSON.stringify({ 
+          roomId, 
+          fen: gameInstance.fen(), 
+          pgn: gameInstance.pgn(),
+          history: gameInstance.history() 
+        })
       });
-    } catch (e) {
-      console.warn("Backend de Ameliasoft LLC fuera de línea.");
-    }
-  }, [isRemote, game]);
+    } catch (e) { }
+  }, [isRemote]);
 
   const makeMove = useCallback((move: any) => {
     try {
-      const gameCopy = new Chess(game.fen());
+      const gameCopy = new Chess();
+      gameCopy.loadPgn(game.pgn());
       const result = gameCopy.move(move);
       
       if (result) {
         setGame(gameCopy);
         setFen(gameCopy.fen());
+        setMoveHistory(gameCopy.history());
         setLastMove({ from: result.from, to: result.to });
         updateCaptured(gameCopy);
 
         if (isRemote) {
-          syncRemoteMove(gameCopy.fen());
+          syncRemoteMove(gameCopy);
         }
         return true;
       }
-    } catch (e) {
-      console.log("Movimiento no permitido.");
-    }
+    } catch (e) { }
     return false;
-  }, [game, isRemote, syncRemoteMove]);
+  }, [game, isRemote, syncRemoteMove, updateCaptured]);
 
-  // Motor Hardcoded (Sin IA)
   useEffect(() => {
     if (mode === GameMode.VS_CPU && game.turn() === 'b' && !game.isGameOver()) {
       const timer = setTimeout(() => {
@@ -194,11 +217,7 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
 
   const onSquareClick = (square: Square) => {
     if (isThinking || game.isGameOver()) return;
-
-    // Bloqueo de turno en remoto: No puedes mover si no es tu turno o tu color
-    if (isRemote && game.turn() !== myColor) {
-        return;
-    }
+    if (isRemote && game.turn() !== myColor) return;
 
     if (selectedSquare) {
       const moveResult = makeMove({ from: selectedSquare, to: square, promotion: 'q' });
@@ -217,7 +236,6 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
   const sendChatMessage = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!inputText.trim()) return;
-    
     const roomId = window.location.hash.split('-')[1]?.split('?')[0];
     if (!roomId) return;
 
@@ -231,16 +249,17 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ roomId, ...newMessage })
         });
-    } catch (e) { /* Fallback local */ }
+    } catch (e) { }
   };
 
   const resetGame = () => {
     const newGame = new Chess();
     setGame(newGame);
     setFen(newGame.fen());
+    setMoveHistory([]);
     setSelectedSquare(null);
     setLastMove(null);
-    setCaptured({w: [], b: []});
+    updateCaptured(newGame);
     localStorage.removeItem('chess_save_data');
   };
 
@@ -254,13 +273,11 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
 
   const isCheck = game.inCheck();
   const isCheckmate = game.isCheckmate();
-  const moveHistory = game.history();
 
   return (
-    <div className="flex flex-col lg:flex-row gap-8 w-full max-w-7xl animate-in fade-in duration-700">
+    <div className="flex flex-col lg:flex-row gap-4 lg:gap-8 w-full max-w-7xl animate-in fade-in duration-500">
       <div className="flex-1 flex flex-col items-center">
-        {/* Contenedor del Tablero - Mantenido estable */}
-        <div className="relative group">
+        <div className="relative">
           <ChessBoard 
             fen={fen} 
             selectedSquare={selectedSquare} 
@@ -273,137 +290,131 @@ const ChessGame: React.FC<Props> = ({ mode }) => {
           />
           
           {(isCheckmate || game.isDraw()) && (
-            <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center rounded-xl z-20 border border-indigo-500/30">
-              <div className="text-center p-8 bg-slate-900 rounded-3xl border border-slate-700 shadow-2xl scale-110">
-                <Trophy className="w-16 h-16 text-yellow-500 mx-auto mb-4" />
-                <h2 className="text-4xl font-serif mb-2">
-                  {isCheckmate ? '¡Pailas, Mate!' : '¡Tablas, veci!'}
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center rounded-xl z-20">
+              <div className="text-center p-6 bg-slate-900 rounded-3xl border border-slate-700 shadow-2xl scale-100 md:scale-110 mx-4">
+                <Trophy className="w-12 h-12 text-yellow-500 mx-auto mb-2" />
+                <h2 className="text-2xl md:text-3xl font-serif mb-4">
+                  {isCheckmate ? '¡Mate, parce!' : '¡Tablas!'}
                 </h2>
-                <button onClick={resetGame} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-all shadow-lg active:scale-95">
-                  Otra partidita, ala
+                <button onClick={resetGame} className="w-full px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-all shadow-lg">
+                  Revancha
                 </button>
               </div>
             </div>
           )}
         </div>
 
-        <div className="mt-8 w-full flex justify-between items-center bg-slate-900/50 p-6 rounded-3xl border border-slate-800 backdrop-blur-md">
-          <div className="flex items-center gap-4">
-            <div className={`w-4 h-4 rounded-full ${game.turn() === 'w' ? 'bg-white shadow-[0_0_10px_white]' : 'bg-slate-700 border border-slate-500'}`} />
-            <span className="text-lg font-medium">
-              {game.isGameOver() ? 'Partida terminada' : (
+        <div className="mt-4 w-full flex justify-between items-center bg-slate-900/50 p-3 md:p-6 rounded-2xl md:rounded-3xl border border-slate-800 backdrop-blur-md">
+          <div className="flex items-center gap-3">
+            <div className={`w-3 h-3 md:w-4 md:h-4 rounded-full ${game.turn() === 'w' ? 'bg-white shadow-[0_0_8px_white]' : 'bg-slate-700 border border-slate-500'}`} />
+            <span className="text-sm md:text-lg font-medium">
+              {game.isGameOver() ? 'Fin' : (
                 isRemote 
-                ? (game.turn() === myColor ? 'Su turno, hágale' : 'Espere al llave...')
-                : `Mueve el ${game.turn() === 'w' ? "Blanco" : "Negro"}`
+                ? (game.turn() === myColor ? 'Tu turno' : 'El llave piensa...')
+                : `${game.turn() === 'w' ? "Blancas" : "Negras"}`
               )}
             </span>
           </div>
-          <div className="flex gap-3">
-            <button onClick={resetGame} className="p-3 bg-slate-800 hover:bg-slate-700 rounded-xl transition-colors" title="Limpiar partida">
-              <RotateCcw className="w-5 h-5 text-slate-400" />
+          <div className="flex gap-2">
+            <button onClick={resetGame} className="p-2 md:p-3 bg-slate-800 hover:bg-slate-700 rounded-lg md:rounded-xl transition-colors">
+              <RotateCcw className="w-4 h-4 md:w-5 md:h-5 text-slate-400" />
             </button>
             {isRemote && (
               <button 
                 onClick={copyInviteLink}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${showCopied ? 'bg-emerald-600' : 'bg-indigo-600 hover:bg-indigo-500'}`}
+                className={`flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 rounded-lg md:rounded-xl transition-all ${showCopied ? 'bg-emerald-600' : 'bg-indigo-600 hover:bg-indigo-500'}`}
               >
                 {showCopied ? <CheckCircle2 className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                <span className="text-sm font-bold">{showCopied ? '¡Copiado!' : 'Link pal llave'}</span>
+                <span className="text-[10px] md:text-sm font-bold uppercase tracking-tight">{showCopied ? 'Listo' : 'Invitar'}</span>
               </button>
             )}
           </div>
         </div>
       </div>
 
-      <div className="w-full lg:w-[400px] flex flex-col gap-6">
-        {/* Panel Superior: Status y Capturas */}
-        <div className="bg-slate-900/60 p-6 rounded-3xl border border-slate-800 backdrop-blur-xl">
-          <div className="flex justify-between items-center mb-6">
+      <div className="w-full lg:w-[380px] flex flex-col gap-4">
+        <div className="bg-slate-900/60 p-4 md:p-6 rounded-2xl md:rounded-3xl border border-slate-800 backdrop-blur-xl">
+          <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-2">
-                <Globe className={`w-4 h-4 ${isRemote && isOpponentOnline ? 'text-emerald-400' : 'text-slate-500'}`} />
-                <span className="text-xs font-bold uppercase tracking-widest text-slate-400">
-                    {isRemote ? (isOpponentOnline ? 'El llave está conectado' : 'El llave se fue') : 'Partida Local'}
+                <Globe className={`w-3 h-3 md:w-4 md:h-4 ${isRemote && isOpponentOnline ? 'text-emerald-400' : 'text-slate-500'}`} />
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                    {isRemote ? (isOpponentOnline ? 'Llave en línea' : 'Desconectado') : 'Local'}
                 </span>
             </div>
             {isRemote && (
-                <div className="flex items-center gap-2 px-3 py-1 bg-slate-800 rounded-full">
-                    <User className="w-3 h-3 text-indigo-400" />
-                    <span className="text-[10px] font-bold text-slate-300">YO: {myColor === 'w' ? 'BLANCAS' : 'NEGRAS'}</span>
+                <div className="flex items-center gap-2 px-2 py-0.5 bg-slate-800 rounded-full">
+                    <span className="text-[9px] font-bold text-slate-300">YO: {myColor === 'w' ? 'W' : 'B'}</span>
                 </div>
             )}
           </div>
           
-          <div className="space-y-4">
-            <p className="text-xs text-slate-500 uppercase font-bold tracking-tighter">Botín de guerra</p>
-            <div className="flex flex-wrap gap-1">
-               {captured.b.concat(captured.w).length > 0 ? captured.b.concat(captured.w).map((p, i) => (
-                 <div key={i} className="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-[10px] text-slate-300 font-bold">{p.slice(1)}</div>
-               )) : <span className="text-xs italic text-slate-600">Nadie ha caído aún</span>}
+          <div className="space-y-3">
+            <p className="text-[10px] text-slate-500 uppercase font-bold tracking-tighter">Botín</p>
+            <div className="grid grid-cols-1 gap-2">
+              <div className="flex flex-wrap gap-1 items-center min-h-[24px]">
+                <div className="w-1 h-4 bg-white/20 rounded-full mr-1" />
+                {captured.w.map((p, i) => (
+                  <div key={`w-${i}`} className="w-5 h-5 bg-slate-800/80 rounded flex items-center justify-center p-0.5 shadow-sm">
+                    {ChessPieces[p]}
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1 items-center min-h-[24px]">
+                <div className="w-1 h-4 bg-slate-600/40 rounded-full mr-1" />
+                {captured.b.map((p, i) => (
+                  <div key={`b-${i}`} className="w-5 h-5 bg-slate-800/80 rounded flex items-center justify-center p-0.5 shadow-sm">
+                    {ChessPieces[p]}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Panel de Chat / Historial */}
-        <div className="flex-1 bg-slate-900/60 border border-slate-800 rounded-3xl overflow-hidden flex flex-col min-h-[400px] backdrop-blur-xl shadow-2xl">
+        <div className="flex-1 bg-slate-900/60 border border-slate-800 rounded-2xl md:rounded-3xl overflow-hidden flex flex-col min-h-[200px] lg:min-h-[400px] backdrop-blur-xl">
           <div className="flex border-b border-slate-800">
-            <button className="flex-1 py-4 text-xs font-bold tracking-widest text-indigo-400 border-b-2 border-indigo-400 uppercase flex items-center justify-center gap-2">
-                {isRemote ? <><MessageCircle className="w-4 h-4"/> Chisme y Chat</> : <><List className="w-4 h-4"/> Historial de Jugadas</>}
+            <button className="flex-1 py-3 text-[10px] font-bold tracking-widest text-indigo-400 border-b-2 border-indigo-400 uppercase flex items-center justify-center gap-2">
+                {isRemote ? <MessageCircle className="w-3 h-3"/> : <List className="w-3 h-3"/>}
+                {isRemote ? 'Chat' : 'Jugadas'}
             </button>
           </div>
           
-          {/* Contenedor con Ref para scroll interno */}
           <div 
             ref={scrollContainerRef}
-            className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[400px] scroll-smooth"
+            className="flex-1 overflow-y-auto p-3 space-y-3 max-h-[300px] lg:max-h-[400px] scroll-smooth"
           >
             {isRemote ? (
-                messages.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-slate-600 italic text-sm text-center px-8">
-                        <MessageCircle className="w-8 h-8 mb-2 opacity-20" />
-                        Mándele un saludo al llave para que no se aburra.
-                    </div>
-                ) : (
-                    messages.map((m, i) => (
-                        <div key={m.id || i} className={`flex flex-col ${m.sender === myColor ? 'items-end' : 'items-start'}`}>
-                            <div className={`max-w-[80%] p-3 rounded-2xl text-sm ${
-                                m.sender === myColor 
-                                ? 'bg-indigo-600 text-white rounded-tr-none' 
-                                : 'bg-slate-800 text-slate-200 rounded-tl-none border border-slate-700'
-                            }`}>
-                                {m.text}
-                            </div>
-                            <span className="text-[9px] text-slate-600 mt-1 uppercase font-bold">
-                                {m.sender === 'w' ? 'Blancas' : 'Negras'}
-                            </span>
+                messages.map((m, i) => (
+                    <div key={m.id || i} className={`flex flex-col ${m.sender === myColor ? 'items-end' : 'items-start'}`}>
+                        <div className={`max-w-[85%] p-2.5 rounded-xl text-xs md:text-sm ${
+                            m.sender === myColor ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-slate-800 text-slate-200 rounded-tl-none border border-slate-700'
+                        }`}>
+                            {m.text}
                         </div>
-                    ))
-                )
+                    </div>
+                ))
             ) : (
-                <div className="grid grid-cols-2 gap-2">
-                    {moveHistory.length === 0 ? (
-                        <div className="col-span-2 text-center text-slate-600 py-20 text-sm italic">Haga un movimiento para ver el registro.</div>
-                    ) : (
-                        moveHistory.map((move, i) => (
-                            <div key={i} className="flex items-center gap-3 p-2 bg-slate-800/40 border border-slate-800 rounded-lg text-sm">
-                                <span className="text-slate-600 font-mono w-4">{i + 1}.</span>
-                                <span className="text-indigo-300 font-bold">{move}</span>
-                            </div>
-                        ))
-                    )}
+                <div className="grid grid-cols-2 gap-1.5">
+                    {moveHistory.map((move, i) => (
+                        <div key={i} className="flex items-center gap-2 p-1.5 bg-slate-800/40 border border-slate-800 rounded-lg text-[10px] md:text-xs">
+                            <span className="text-slate-600 font-mono w-4">{i + 1}.</span>
+                            <span className="text-indigo-300 font-bold">{move}</span>
+                        </div>
+                    ))}
                 </div>
             )}
           </div>
 
           {isRemote && (
-            <form onSubmit={sendChatMessage} className="p-4 bg-slate-900/80 border-t border-slate-800 flex gap-2">
+            <form onSubmit={sendChatMessage} className="p-3 bg-slate-900/80 border-t border-slate-800 flex gap-2">
                 <input 
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Dígale algo al veci..."
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
+                    placeholder="Mande un saludo..."
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                 />
-                <button type="submit" className="p-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-white transition-all active:scale-90 shadow-lg">
-                    <Send className="w-4 h-4" />
+                <button type="submit" className="p-2 bg-indigo-600 rounded-lg text-white active:scale-90">
+                    <Send className="w-3 h-3" />
                 </button>
             </form>
           )}
